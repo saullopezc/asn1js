@@ -16,9 +16,14 @@
 import { rfcdef } from './rfcdef.js';
 
 function translate(def, tn, stats) {
-    if (def?.type == 'tag' && !def.explicit)
-        // def.type = def.content[0].type;
-        def = def.content[0].type;
+    if (def?.type == 'tag' && !def.explicit) {
+        // IMPLICIT tag: continue with the inner type, but keep the element id,
+        // its optionality, and the tag name (the encoded value shows the tag)
+        const el = def;
+        def = Object.assign({}, el.content[0].type, { id: el.id, tagName: el.name });
+        if ('optional' in el)
+            def.optional = el.optional;
+    }
     if (def?.definedBy)
         try {
             // hope current OIDs contain the type name (will need to parse from RFC itself)
@@ -31,12 +36,14 @@ function translate(def, tn, stats) {
     }
     if (def?.name == 'CHOICE' || def?.type?.name == 'CHOICE') {
         for (let c of def.content ?? def.type.content) {
-            if (tn != c.type.name && tn != c.name)
-                c = translate(c);
-            if (tn == c.type.name || tn == c.name) {
+            if (c.type == 'tag' || (tn != c.type.name && tn != c.name))
+                c = translate(c, tn, stats);
+            if (tn == c.type.name || tn == c.name || tn == c.tagName) {
                 def = Object.assign({}, def);
                 if (c.id) // show the CHOICE id, but add it to existing one if present
                     def.id = def.id ? def.id + ' ' + c.id : c.id;
+                if (c.tagName)
+                    def.tagName = c.tagName;
                 def.type = c.type.name ? c.type : c;
                 break;
             }
@@ -75,7 +82,7 @@ export class Defs {
         ++stats.total;
         if (def?.type) {
             // if (def.id || def.name) ++stats.recognized;
-            if (tn == def.type.name || tn == def.name || def.name == 'ANY')
+            if (tn == def.type.name || tn == def.name || tn == def.tagName || def.name == 'ANY')
                 ++stats.recognized;
             else if (def.name)
                 def = Object.assign({ mismatch: 1 }, def);

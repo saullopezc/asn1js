@@ -757,6 +757,30 @@ export class ASN1 {
     }
 
     /**
+     * Build a plain JavaScript value for JSON export (used by JSON.stringify).
+     * Keys are schema field names when a definition was matched (def.id),
+     * type names otherwise; repeated keys turn the container into an array.
+     * @returns {Object|Array|string|null} The JSON-friendly value.
+     */
+    toJSON() {
+        if (this.sub === null) {
+            let content = this.content(Infinity);
+            if (typeof content == 'string') {
+                // drop the size prefix, e.g. "(8 byte)\n…"
+                content = content.replace(/^\(\d+ (bit|byte|elem)\)(\n|$)/, '');
+                // keep only the value for OIDs (drop description lines)
+                if (this.tag.isUniversal() && (this.tag.tagNumber == 0x06 || this.tag.tagNumber == 0x0D))
+                    content = content.split('\n', 1)[0];
+            }
+            return content;
+        }
+        const items = this.sub.map(s => [s.def?.id || s.typeName(), s.toJSON()]);
+        if (new Set(items.map(i => i[0])).size == items.length)
+            return Object.fromEntries(items);
+        return items.map(i => i[1]); // repeated names (e.g. SEQUENCE OF): array
+    }
+
+    /**
      * Decode the length field of an ASN.1 element.
      * @param {Stream} stream - The stream to read from.
      * @returns {number|null} The decoded length, or null for indefinite length.
