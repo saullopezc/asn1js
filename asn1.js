@@ -398,7 +398,15 @@ export class Stream {
      * @returns {Object} Object with size and str properties
      */
     parseOctetString(start, end, maxLength) {
-        try {
+        // quick scan first: binary content (control bytes) goes straight to
+        // the hex dump, avoiding the cost of one exception per binary value
+        let printable = true;
+        for (let i = start; printable && i < end; ++i) {
+            const c = this.get(i);
+            if (c < 32 && c != 9 && c != 10 && c != 13)
+                printable = false;
+        }
+        if (printable) try {
             let s = this.parseStringUTF(start, end, maxLength);
             checkPrintable(s.str);
             return { size: end - start, str: s.str };
@@ -799,6 +807,47 @@ export class ASN1 {
         for (let i = 0; i < len; ++i)
             value = (value * 256) + stream.get();
         return value;
+    }
+
+    /**
+     * Scans the input for the offsets of all top-level (concatenated)
+     * elements WITHOUT building trees: it only reads tag and length octets,
+     * so it stays O(records) in time and memory. BER indefinite lengths
+     * force a full parse of that single element to locate its end.
+     * @param {Stream|array|string} enc - The input data.
+     * @param {number} [offset=0] - The offset to start scanning from.
+     * @param {number} [maxRecords=Infinity] - Safety cap on the number of records.
+     * @returns {{offsets: Array<number>, error: ?{offset: number, message: string}}}
+     *          Offsets found so far and the reason the scan stopped, if any.
+     */
+    static scanRecords(enc, offset = 0, maxRecords = Infinity) {
+        const stream = (enc instanceof Stream) ? enc : new Stream(enc, offset || 0);
+        const offsets = [];
+        let error = null;
+        while (stream.pos < stream.enc.length) {
+            const start = stream.pos;
+            try {
+                if (offsets.length >= maxRecords)
+                    throw new Error('Too many records (safety limit of ' + maxRecords + ' reached)');
+                new ASN1Tag(stream); // skip identifier octets (validates long tags)
+                const len = ASN1.decodeLength(stream);
+                if (len === null) // BER indefinite length: parse this element fully
+                    stream.pos = ASN1.decode(stream.enc, start).posEnd();
+                else {
+                    const end = stream.pos + len;
+                    if (end > stream.enc.length)
+                        throw new Error('Element at offset ' + start + ' has a length of ' + len + ', which is past the end of the stream');
+                    stream.pos = end;
+                }
+                if (stream.pos <= start) // defensive: never loop without progress
+                    throw new Error('Scan stalled at offset ' + start);
+                offsets.push(start);
+            } catch (e) {
+                error = { offset: start, message: String(e.message ?? e) };
+                break;
+            }
+        }
+        return { offsets, error };
     }
 
     /**

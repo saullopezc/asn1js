@@ -17,6 +17,7 @@ const
     wantHex = checkbox('wantHex'),
     trimHex = checkbox('trimHex'),
     wantDef = checkbox('wantDef'),
+    wantUrl = checkbox('wantUrl'),
     area = id('area'),
     file = id('file'),
     examples = id('examples'),
@@ -34,8 +35,15 @@ const
     butFindNext = id('butFindNext'),
     searchInfo = id('searchInfo');
 
+const
+    maxRecords = 1000000, // safety cap: malformed input must not exhaust memory
+    recCacheMax = 16, // decoded trees kept for fast navigation
+    maxSearchContent = 16384; // cap per-value preview built during search
+
 let hash = null;
-let records = [],
+let recOffsets = [], // start offset of each record; trees are decoded lazily
+    recCache = new Map(), // record index -> decoded tree (insertion order = LRU)
+    currentRec = null, // decoded tree of the visible record
     recIndex = 0,
     recRemain = null,
     currentType = null,
@@ -44,8 +52,31 @@ let records = [],
     currentName = null,
     currentSchemaText = null,
     currentSchemaName = null,
-    searchResults = [],
+    searchResults = [], // {ri, path}: node paths, valid across re-renders
     searchIndex = -1;
+
+function recordAt(i) {
+    let r = recCache.get(i);
+    if (r) {
+        recCache.delete(i); // re-insert: Map iteration order doubles as LRU
+        recCache.set(i, r);
+        return r;
+    }
+    r = ASN1DOM.decode(currentDer, recOffsets[i]);
+    recCache.set(i, r);
+    if (recCache.size > recCacheMax)
+        recCache.delete(recCache.keys().next().value);
+    return r;
+}
+function nodeByPath(root, path) {
+    let n = root;
+    for (const i of path) {
+        if (!n.sub || !n.sub[i])
+            return null;
+        n = n.sub[i];
+    }
+    return n;
+}
 
 if (!window.console || !window.console.log) // IE8 with closed developer tools
     window.console = { log: function () {} };
@@ -74,17 +105,27 @@ function show(asn1) {
     if (wantHex.checked) dump.appendChild(asn1.toHexDOM(undefined, trimHex.checked));
 }
 function showCurrent() {
-    const asn1 = records[recIndex];
-    Defs.match(asn1, wantDef.checked ? currentType : null);
-    recnav.style.display = (records.length > 1) ? '' : 'none';
-    recLabel.innerText = 'record ' + (recIndex + 1) + ' of ' + records.length;
+    recnav.style.display = (recOffsets.length > 1) ? '' : 'none';
+    recLabel.innerText = 'record ' + (recIndex + 1) + ' of ' + recOffsets.length;
     recPrev.disabled = (recIndex === 0);
-    recNext.disabled = (recIndex === records.length - 1);
-    show(asn1);
+    recNext.disabled = (recIndex === recOffsets.length - 1);
+    try {
+        currentRec = recordAt(recIndex);
+    } catch (e) { // lazily-decoded record may turn out corrupted
+        currentRec = null;
+        text(tree, 'Record ' + (recIndex + 1) + ' cannot be decoded: ' + e);
+        dump.innerHTML = '';
+        return;
+    }
+    Defs.match(currentRec, wantDef.checked ? currentType : null);
+    show(currentRec);
     // re-apply search marks (the tree is rebuilt on every render)
     for (const r of searchResults)
-        if (r.ri === recIndex && r.node.head)
-            r.node.head.classList.add('found');
+        if (r.ri === recIndex) {
+            const n = nodeByPath(currentRec, r.path);
+            if (n && n.head)
+                n.head.classList.add('found');
+        }
     if (recRemain) {
         let p = document.createElement('p');
         p.innerText = recRemain;
@@ -99,22 +140,32 @@ function gotoResult(i) {
     recIndex = r.ri;
     showCurrent();
     searchInfo.innerText = 'match ' + (searchIndex + 1) + ' of ' + searchResults.length +
-        (records.length > 1 ? ' (record ' + (r.ri + 1) + ')' : '');
-    if (r.node.head) {
-        r.node.head.classList.add('foundCurrent');
-        r.node.head.scrollIntoView({ block: 'center' });
+        (recOffsets.length > 1 ? ' (record ' + (r.ri + 1) + ')' : '');
+    const n = currentRec && nodeByPath(currentRec, r.path);
+    if (n && n.head) {
+        n.head.classList.add('foundCurrent');
+        n.head.scrollIntoView({ block: 'center' });
     }
 }
 function doSearch() {
     const term = searchText.value.trim().toLowerCase();
     searchResults = [];
     searchIndex = -1;
-    if (!term || records.length === 0) {
+    if (!term || recOffsets.length === 0) {
         searchInfo.innerText = '';
-        if (records.length) showCurrent();
+        if (recOffsets.length) showCurrent();
         return;
     }
-    records.forEach((rec, ri) => {
+    // records are decoded transiently one at a time (memory stays flat);
+    // matches are stored as node paths so they survive re-renders
+    const path = [];
+    for (let ri = 0; ri < recOffsets.length; ++ri) {
+        let rec;
+        try {
+            rec = (ri === recIndex && currentRec) ? currentRec : ASN1DOM.decode(currentDer, recOffsets[ri]);
+        } catch (ignore) {
+            continue; // corrupted record: skip
+        }
         if (wantDef.checked) // annotate field names also on non-visible records
             Defs.match(rec, currentType);
         (function walk(n) {
@@ -122,25 +173,34 @@ function doSearch() {
             if (n.def?.id) hay += ' ' + n.def.id;
             if (n.def?.name) hay += ' ' + n.def.name;
             try {
-                const c = n.content(Infinity);
+                const c = n.content(maxSearchContent);
                 if (c !== null) hay += ' ' + c;
             } catch (ignore) { /*ignore*/ }
             if (hay.toLowerCase().indexOf(term) >= 0)
-                searchResults.push({ ri, node: n });
+                searchResults.push({ ri, path: path.slice() });
             if (n.sub)
-                n.sub.forEach(walk);
+                n.sub.forEach((s, i) => {
+                    path.push(i);
+                    walk(s);
+                    path.pop();
+                });
         })(rec);
-    });
+    }
     if (searchResults.length)
         gotoResult(0);
     else
         searchInfo.innerText = 'no matches';
 }
 function rebuildDefs() {
-    const first = records[0];
     currentType = null;
-    if (!first)
+    if (recOffsets.length === 0)
         return;
+    let first;
+    try {
+        first = recordAt(0);
+    } catch (ignore) {
+        return;
+    }
     if (wantDef.checked) {
         selectDefs.innerHTML = '';
         // candidate root types: every type of each user schema + the common RFC types
@@ -198,7 +258,7 @@ function loadSchema(text, source) {
         currentSchemaText = text;
         currentSchemaName = source;
         rebuildDefs();
-        if (records.length)
+        if (recOffsets.length)
             showCurrent();
         updateHash();
     } catch (e) {
@@ -210,10 +270,17 @@ const maxSchemaHash = 100000; // schemas bigger than this are not reflected in t
 function updateHash() {
     // keep the URL in sync so a refresh (or a shared link) restores the
     // session; without a schema the legacy '#<base64>' form is kept
+    if (!wantUrl.checked) {
+        // privacy: keep data and schema out of the URL and browser history
+        try {
+            window.location.hash = hash = '';
+        } catch (ignore) { /*ignore*/ }
+        return;
+    }
     const parts = [];
     let dataB64 = '';
-    if (currentDer && records.length && currentDer.length < maxLength)
-        dataB64 = records[0].stream.b64Dump(0, currentDer.length);
+    if (currentDer && recOffsets.length && currentDer.length < maxLength)
+        dataB64 = new Stream(currentDer, 0).b64Dump(0, currentDer.length);
     if (currentSchemaText) {
         const bytes = new TextEncoder().encode(currentSchemaText);
         const schemaB64 = new Stream(bytes, 0).b64Dump(0, bytes.length);
@@ -243,20 +310,19 @@ function spliceFile(start, end, insert) {
     return out;
 }
 function reload(out) {
-    // re-decode a modified buffer, staying on the same record if possible
+    // re-index a modified buffer, staying on the same record if possible
     const idx = recIndex;
     decode(out);
-    if (records.length) {
-        recIndex = Math.min(idx, records.length - 1);
+    if (recOffsets.length) {
+        recIndex = Math.min(idx, recOffsets.length - 1);
         showCurrent();
     }
 }
 function rebuildRecord(edits) {
     // re-encode the current record (with optional content edits or a mutated
     // sub tree) and splice it into the file buffer; offsets become stale
-    const rec = records[recIndex];
-    const recBytes = encodeNode(rec, edits);
-    reload(spliceFile(rec.posStart(), rec.posEnd(), recBytes));
+    const recBytes = encodeNode(currentRec, edits);
+    reload(spliceFile(currentRec.posStart(), currentRec.posEnd(), recBytes));
 }
 function applyEdit(asn1, content) {
     rebuildRecord(new Map([[asn1, content]]));
@@ -276,7 +342,7 @@ function nodeBytes(asn1) {
     return currentDer.subarray(asn1.posStart(), asn1.posEnd());
 }
 function editValue(asn1) {
-    if (!currentDer || records.length === 0)
+    if (!currentDer || !currentRec)
         return;
     const isUniversal = asn1.tag.isUniversal(),
         tn = asn1.tag.tagNumber,
@@ -316,11 +382,11 @@ function canDuplicate(asn1) {
     // duplicating is only valid where repetition is legal: whole records,
     // elements of a SEQUENCE OF / SET OF, or (without schema) values whose
     // siblings already repeat the same tag; unique fields would be malformed
-    if (!currentDer || records.length === 0)
+    if (!currentDer || !currentRec)
         return false;
-    if (records.includes(asn1))
+    if (asn1 === currentRec)
         return true;
-    const parent = findParent(records[recIndex], asn1);
+    const parent = findParent(currentRec, asn1);
     if (!parent || !parent.tag.tagConstructed)
         return false;
     if (isListParent(parent))
@@ -335,36 +401,35 @@ function duplicateValue(asn1) {
         alert('Only whole records and elements of a list (SEQUENCE OF / SET OF) can be duplicated: unique fields would malform the record.');
         return;
     }
-    if (records.includes(asn1)) { // whole record: insert a copy right after it
+    if (asn1 === currentRec) { // whole record: insert a copy right after it
         reload(spliceFile(asn1.posEnd(), asn1.posEnd(), nodeBytes(asn1)));
         return;
     }
-    const parent = findParent(records[recIndex], asn1);
+    const parent = findParent(currentRec, asn1);
     parent.sub.splice(parent.sub.indexOf(asn1) + 1, 0, { rawBytes: nodeBytes(asn1).slice() });
     rebuildRecord();
 }
 function isMandatoryField(asn1) {
     // a value that the schema marks as a non-optional field of its container
     // (never a whole record nor an element of a list)
-    if (!currentDer || records.length === 0 || records.includes(asn1))
+    if (!currentDer || !currentRec || asn1 === currentRec)
         return false;
-    const parent = findParent(records[recIndex], asn1);
+    const parent = findParent(currentRec, asn1);
     if (!parent || !parent.tag.tagConstructed || isListParent(parent))
         return false;
     return Boolean(asn1.def?.id && asn1.def.optional !== true);
 }
 function removeValue(asn1) {
-    if (!currentDer)
+    if (!currentDer || !currentRec)
         return;
     const label = asn1.def?.id || asn1.typeName();
-    if (records.includes(asn1)) { // whole record
-        if (!confirm('Delete record ' + (recIndex + 1) + ' of ' + records.length + '?'))
+    if (asn1 === currentRec) { // whole record
+        if (!confirm('Delete record ' + (recIndex + 1) + ' of ' + recOffsets.length + '?'))
             return;
         reload(spliceFile(asn1.posStart(), asn1.posEnd(), null));
         return;
     }
-    const rec = records[recIndex];
-    const parent = findParent(rec, asn1);
+    const parent = findParent(currentRec, asn1);
     if (!parent || !parent.tag.tagConstructed) {
         alert('Cannot delete here: the container is not a constructed value.');
         return;
@@ -442,7 +507,9 @@ export function decode(der, offset) {
         der = u8;
     }
     currentDer = der;
-    records = [];
+    recOffsets = [];
+    recCache.clear();
+    currentRec = null;
     recIndex = 0;
     recRemain = null;
     currentType = null;
@@ -450,25 +517,19 @@ export function decode(der, offset) {
     searchIndex = -1;
     searchInfo.innerText = '';
     try {
-        // decode all concatenated structures (e.g. CDR files contain many records)
-        let pos = offset;
-        while (pos < der.length) {
-            try {
-                const asn1 = ASN1DOM.decode(der, pos);
-                records.push(asn1);
-                pos = asn1.posEnd();
-            } catch (e) {
-                if (records.length === 0)
-                    throw e;
-                recRemain = 'Input contains ' + (der.length - pos) + ' undecoded bytes at offset ' + pos + '. ' + e;
-                break;
-            }
+        // index all concatenated structures (e.g. CDR files contain many
+        // records) WITHOUT decoding them: trees are built lazily per record
+        const scan = ASN1DOM.scanRecords(der, offset, maxRecords);
+        recOffsets = scan.offsets;
+        if (scan.error) {
+            if (recOffsets.length === 0)
+                throw new Error(scan.error.message);
+            recRemain = 'Input contains ' + (der.length - scan.error.offset) +
+                ' undecoded bytes at offset ' + scan.error.offset + '. ' + scan.error.message;
         }
-        if (records.length === 0)
-            throw new Error('No ASN.1 structure found.');
         rebuildDefs();
         showCurrent();
-        let b64 = der.length < maxLength ? records[0].stream.b64Dump(offset, der.length) : '';
+        let b64 = der.length < maxLength ? new Stream(der, 0).b64Dump(offset, der.length) : '';
         if (area.value === '') area.value = Base64.pretty(b64);
         updateHash();
     } catch (e) {
@@ -486,12 +547,33 @@ export function decodeText(val) {
         dump.innerHTML = '';
     }
 }
-export function decodeBinaryString(str) {
+function looksLikeText(u8) {
+    // sniff a printable-ASCII prefix (hex / base64 / PEM files)
+    const n = Math.min(u8.length, 4096);
+    if (n === 0)
+        return false;
+    for (let i = 0; i < n; ++i) {
+        const b = u8[i];
+        if (b != 9 && b != 10 && b != 13 && (b < 32 || b > 126))
+            return false;
+    }
+    return true;
+}
+export function decodeBinaryString(data) {
+    // accepts the file content as Uint8Array (or a legacy binary string)
     let der;
     try {
-        if (reHex.test(str)) der = Hex.decode(str);
-        else if (Base64.re.test(str)) der = Base64.unarmor(str);
-        else der = str;
+        if (typeof data == 'string') {
+            if (reHex.test(data)) der = Hex.decode(data);
+            else if (Base64.re.test(data)) der = Base64.unarmor(data);
+            else der = data;
+        } else if (looksLikeText(data)) {
+            const s = new TextDecoder().decode(data);
+            if (reHex.test(s)) der = Hex.decode(s);
+            else if (Base64.re.test(s)) der = Base64.unarmor(s);
+            else der = data;
+        } else
+            der = data; // raw BER/DER: no intermediate string is built
         decode(der);
     } catch (ignore) {
         text(tree, 'Cannot decode file.');
@@ -509,7 +591,9 @@ const butClickHandlers = {
         tree.innerHTML = '';
         dump.innerHTML = '';
         selectDefs.innerHTML = '';
-        records = [];
+        recOffsets = [];
+        recCache.clear();
+        currentRec = null;
         recRemain = null;
         currentDer = null;
         currentName = null;
@@ -559,11 +643,12 @@ recPrev.onclick = () => {
     }
 };
 recNext.onclick = () => {
-    if (recIndex < records.length - 1) {
+    if (recIndex < recOffsets.length - 1) {
         ++recIndex;
         showCurrent();
     }
 };
+wantUrl.addEventListener('change', updateHash); // applies (or clears) the hash right away
 butFind.onclick = doSearch;
 butFindPrev.onclick = () => gotoResult(searchIndex - 1);
 butFindNext.onclick = () => gotoResult(searchIndex + 1);
@@ -590,9 +675,10 @@ function read(f) {
     let r = new FileReader();
     r.onloadend = function () {
         if (r.error) alert("Your browser couldn't read the specified file (error code " + r.error.code + ').');
-        else decodeBinaryString(r.result);
+        else decodeBinaryString(new Uint8Array(r.result));
     };
-    r.readAsBinaryString(f);
+    // ArrayBuffer avoids the memory-hungry (and deprecated) binary string
+    r.readAsArrayBuffer(f);
 }
 function load() {
     if (file.files.length === 0) alert('Select a file to load first.');
@@ -637,7 +723,7 @@ if ('onhashchange' in window) window.onhashchange = loadFromHash;
 loadFromHash();
 document.ondragover = stop;
 document.ondragleave = stop;
-if ('FileReader' in window && 'readAsBinaryString' in new FileReader()) {
+if ('FileReader' in window) {
     file.style.display = 'block';
     file.onchange = load;
     document.ondrop = dragAccept;
