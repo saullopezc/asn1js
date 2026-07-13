@@ -48,6 +48,11 @@
       <div id="tree"></div>
       <div id="searchbar">
         <input type="text" id="searchText" placeholder="find in all records">
+        <select id="searchIn" title="where to look for the text">
+          <option value="values">values</option>
+          <option value="names">field names</option>
+          <option value="all">values + names</option>
+        </select>
         <input type="button" id="butFind" value="find">
         <input type="button" id="butFindPrev" value="&#9664;">
         <input type="button" id="butFindNext" value="&#9654;">

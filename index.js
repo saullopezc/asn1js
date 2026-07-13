@@ -30,6 +30,7 @@ const
     schemaFile = id('schemaFile'),
     schemaStatus = id('schemaStatus'),
     searchText = id('searchText'),
+    searchIn = id('searchIn'),
     butFind = id('butFind'),
     butFindPrev = id('butFindPrev'),
     butFindNext = id('butFindNext'),
@@ -168,14 +169,19 @@ function doSearch() {
         }
         if (wantDef.checked) // annotate field names also on non-visible records
             Defs.match(rec, currentType);
+        const scope = searchIn.value; // 'values' | 'names' | 'all'
         (function walk(n) {
-            let hay = n.typeName();
-            if (n.def?.id) hay += ' ' + n.def.id;
-            if (n.def?.name) hay += ' ' + n.def.name;
-            try {
-                const c = n.content(maxSearchContent);
-                if (c !== null) hay += ' ' + c;
-            } catch (ignore) { /*ignore*/ }
+            let hay = '';
+            if (scope != 'values') {
+                hay += n.typeName();
+                if (n.def?.id) hay += ' ' + n.def.id;
+                if (n.def?.name) hay += ' ' + n.def.name;
+            }
+            if (scope != 'names')
+                try {
+                    const c = n.content(maxSearchContent);
+                    if (c !== null) hay += ' ' + c;
+                } catch (ignore) { /*ignore*/ }
             if (hay.toLowerCase().indexOf(term) >= 0)
                 searchResults.push({ ri, path: path.slice() });
             if (n.sub)
