@@ -37,6 +37,7 @@ export class SchemaParser {
         this.modules = modules;
         this.currentMod = null;
         this.warnings = [];
+        this.depth = 0;
     }
     getChar(pos) {
         if (pos === undefined)
@@ -133,6 +134,11 @@ export class SchemaParser {
         }
     }
     parseNumberOrValue() {
+        this.skipWhitespace();
+        if (this.peekChar() == '-') { // negative bound, e.g. INTEGER (-2147483648..2147483647)
+            this.getChar();
+            return -this.parseNumber();
+        }
         if (this.isDigit())
             return +this.parseNumber();
         return this.parseIdentifier();
@@ -196,12 +202,19 @@ export class SchemaParser {
                     x.content = [this.parseType()];
                 }
                 break;
-            case 'INTEGER':
-                if (this.tryToken('(')) {
-                    x.range = this.parseRange();
-                    this.expectToken(')');
-                }
-                // falls through
+            case 'INTEGER': {
+                const pInt = this.pos;
+                if (this.tryToken('('))
+                    try {
+                        x.range = this.parseRange();
+                        this.expectToken(')');
+                    } catch (ignoreRange) {
+                        // complex constraint (unions, etc.): skipConstraint eats it
+                        delete x.range;
+                        this.pos = pInt;
+                    }
+            }
+            // falls through
             case 'ENUMERATED':
             case 'BIT STRING':
                 if (this.tryToken('{')) {
@@ -228,16 +241,19 @@ export class SchemaParser {
             case 'UniversalString':
             case 'UTF8String':
             case 'VideotexString':
-            case 'VisibleString':
+            case 'VisibleString': {
+                const p = this.pos;
                 if (this.tryToken('(')) {
                     if (this.tryToken('SIZE')) {
                         this.expectToken('(');
                         x.size = this.parseRange();
                         this.expectToken(')');
-                    }
-                    this.expectToken(')');
+                        this.expectToken(')');
+                    } else // other constraints (e.g. contained subtype): skipConstraint eats them
+                        this.pos = p;
                 }
                 break;
+            }
             case 'UTCTime':
             case 'GeneralizedTime':
                 break;
@@ -281,22 +297,28 @@ export class SchemaParser {
         };
     }
     parseType() {
-        if (this.peekChar() == '[')
-            return this.parseTaggedType();
-        let p = this.pos;
-        let x;
+        if (++this.depth > 100) // untrusted schemas must not blow the stack
+            this.exception('Type nesting exceeds maximum depth of 100');
         try {
-            x = this.parseBuiltinType();
-        } catch (ignore) {
-            this.pos = p;
-            x = {
-                name: this.parseIdentifier(),
-                type: 'defined',
-            };
-            //TODO "restricted string type"
+            if (this.peekChar() == '[')
+                return this.parseTaggedType();
+            let p = this.pos;
+            let x;
+            try {
+                x = this.parseBuiltinType();
+            } catch (ignore) {
+                this.pos = p;
+                x = {
+                    name: this.parseIdentifier(),
+                    type: 'defined',
+                };
+                //TODO "restricted string type"
+            }
+            this.skipConstraint();
+            return x;
+        } finally {
+            --this.depth;
         }
-        this.skipConstraint();
-        return x;
     }
     parseValueOID() {
         this.expectToken('{');

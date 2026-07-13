@@ -248,6 +248,25 @@ tests.push(new Tests('Length', function (t) {
     ['87FFFFFFFFFFFFFF', 'Exception:\nError: Length over 48 bits not supported at position 0', 'Long form length > 2^48'],
 ]));
 
+tests.push(new Tests('Scan records', function (t) {
+    const [input, expected, comment] = t;
+    let result;
+    try {
+        const scan = ASN1.scanRecords(Hex.decode(input), 0, t[3] ?? Infinity);
+        result = scan.offsets.join(',') + (scan.error ? '|error@' + scan.error.offset : '');
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, comment);
+}, [
+    ['020101020102020103', '0,3,6', 'three concatenated records'],
+    ['30800201050000020107', '0,7', 'BER indefinite length record then INTEGER'],
+    ['0201', '|error@0', 'truncated single record'],
+    ['0201010202', '0|error@3', 'valid record then truncated one'],
+    ['048477777777', '|error@0', 'length past end of stream'],
+    ['020101020102', '0|error@3', 'safety cap on record count', 1],
+]));
+
 tests.push(new Tests('Multi-record', function (t) {
     const input = t[0],
         expected = t[1],
@@ -402,6 +421,31 @@ tests.push(new Tests('Schema', function (t) {
     '3100', 'Rec',
     'warnings:1|Rec SET @0+0 (constructed): (0 elem);',
     'truncated definition is reported as warning'],
+]));
+
+tests.push(new Tests('Schema file', function () {
+    // real-world schema downloaded from the internet (vendored fixture):
+    // exercises the same code path used when a user loads an .asn file
+    let result;
+    try {
+        const mod = parseSchema(fs.readFileSync('examples/rfc4120-KerberosV5Spec2.asn', 'utf8'), 'rfc4120');
+        const missing = checkReferences(mod);
+        const ticket = mod.types.Ticket;
+        result = [
+            mod.name, mod.oid, mod.tagDefault,
+            Object.keys(mod.types).length + ' types',
+            (mod.warnings ?? []).length + ' warnings',
+            missing.length + ' unresolved',
+            'Ticket=' + ticket.type.name + '/' + (ticket.type.explicit ? 'explicit' : 'implicit'),
+        ].join('|');
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result,
+        'KerberosV5Spec2|1.3.6.1.5.2.4.2|EXPLICIT|56 types|0 warnings|0 unresolved|Ticket=Application 1/explicit',
+        'parse RFC 4120 Kerberos module (real-world schema)');
+}, [
+    [0],
 ]));
 
 tests.push(new Tests('JSON', function (t) {

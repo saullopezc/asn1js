@@ -7,6 +7,8 @@ import { Defs } from './defs.js';
 
 const tot = [];
 for await (const file of await fs.opendir('examples')) {
+    if (file.name.endsWith('.asn')) // schema fixtures are not decodable samples
+        continue;
     let content = await fs.readFile('examples/' + file.name);
     try {
         try { // try PEM first
