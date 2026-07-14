@@ -486,6 +486,17 @@ export class Stream {
     }
 }
 
+// universal tag number of each builtin type name used in schema definitions
+// (keep in sync with ASN1.typeName and encoder.js)
+const universalTypeTags = {
+    'BOOLEAN': 0x01, 'INTEGER': 0x02, 'BIT STRING': 0x03, 'OCTET STRING': 0x04,
+    'NULL': 0x05, 'OBJECT IDENTIFIER': 0x06, 'ENUMERATED': 0x0A, 'UTF8String': 0x0C,
+    'SEQUENCE': 0x10, 'SET': 0x11, 'NumericString': 0x12, 'PrintableString': 0x13,
+    'TeletexString': 0x14, 'T61String': 0x14, 'VideotexString': 0x15, 'IA5String': 0x16,
+    'UTCTime': 0x17, 'GeneralizedTime': 0x18, 'GraphicString': 0x19, 'VisibleString': 0x1A,
+    'ISO646String': 0x1A, 'GeneralString': 0x1B, 'UniversalString': 0x1C, 'BMPString': 0x1E,
+};
+
 function recurse(el, parser, maxLength) {
     let avoidRecurse = true;
     if (el.tag.tagConstructed && el.sub) {
@@ -599,6 +610,9 @@ export class ASN1 {
 
     /**
      * Get a string preview of the content (intended for humans).
+     * Values with a non-universal tag are rendered according to the type
+     * resolved by a matched schema definition (this.def), when available:
+     * an IMPLICIT tag hides the real type, but the schema knows it.
      * @param {number} maxLength - The maximum length of the content.
      * @returns {string|null} The content preview or null if not supported.
      */
@@ -607,24 +621,87 @@ export class ASN1 {
             return null;
         if (maxLength === undefined)
             maxLength = Infinity;
-        const content = this.posContent(),
-            len = Math.abs(this.length);
         if (!this.tag.isUniversal()) {
             if (this.sub !== null)
                 return '(' + this.sub.length + ' elem)';
+            const tagNumber = universalTypeTags[this.defType()?.name];
+            if (tagNumber !== undefined)
+                try {
+                    const s = this.contentUniversal(tagNumber, maxLength);
+                    if (s !== null)
+                        return s;
+                } catch (ignore) {
+                    // schema-guided parsing failed: fall back to the raw dump
+                }
+            const content = this.posContent(),
+                len = Math.abs(this.length);
             let d1 = this.stream.parseOctetString(content, content + len, maxLength);
             return '(' + d1.size + ' byte)\n' + d1.str;
         }
-        switch (this.tag.tagNumber) {
+        return this.contentUniversal(this.tag.tagNumber, maxLength);
+    }
+
+    /**
+     * The builtin type resolved by a matched schema definition, if any.
+     * Handles both shapes produced by the defs matcher: a def whose .type
+     * is the builtin object, or a def that IS the builtin itself.
+     * @returns {?Object} {name, content?} or undefined
+     */
+    defType() {
+        const d = this.def;
+        if (!d || d.mismatch)
+            return undefined;
+        if (typeof d.type == 'object')
+            return d.type;
+        return (d.type == 'builtin') ? d : undefined;
+    }
+
+    /**
+     * Looks up the name of a value in the named-number list of the matched
+     * schema definition (INTEGER/ENUMERATED), e.g. '85 (pGWRecord)'.
+     * @param {string} s - the decoded value
+     * @returns {string} the value, annotated when a name is defined
+     * @private
+     */
+    namedValue(s) {
+        const names = this.defType()?.content;
+        if (names && typeof names == 'object' && !Array.isArray(names))
+            for (const [name, v] of Object.entries(names))
+                if (String(v) === s)
+                    return s + ' (' + name + ')';
+        return s;
+    }
+
+    /**
+     * Renders the content as the given UNIVERSAL type (the value's own tag
+     * or the type the schema resolved for an implicitly-tagged value).
+     * @param {number} tagNumber - universal tag number to render as
+     * @param {number} maxLength - The maximum length of the content.
+     * @returns {string|null} The content preview or null if not supported.
+     * @private
+     */
+    contentUniversal(tagNumber, maxLength) {
+        const content = this.posContent(),
+            len = Math.abs(this.length);
+        switch (tagNumber) {
         case 0x01: // BOOLEAN
             if (len != 1) return 'invalid length ' + len;
             return (this.stream.get(content) === 0) ? 'false' : 'true';
         case 0x02: // INTEGER
             if (len < 1) return 'invalid length ' + len;
-            return this.stream.parseInteger(content, content + len);
+            return this.namedValue(this.stream.parseInteger(content, content + len));
         case 0x03: { // BIT_STRING
             let d = recurse(this, 'parseBitString', maxLength);
-            return '(' + d.size + ' bit)\n' + d.str;
+            let s = '(' + d.size + ' bit)\n' + d.str;
+            const names = this.defType()?.content;
+            if (names && typeof names == 'object' && !Array.isArray(names)) {
+                const set = Object.entries(names)
+                    .filter(e => d.str.charAt(e[1]) === '1')
+                    .map(e => e[0]);
+                if (set.length)
+                    s += '\n(' + set.join(', ') + ')';
+            }
+            return s;
         }
         case 0x04: { // OCTET_STRING
             let d = recurse(this, 'parseOctetString', maxLength);
@@ -638,7 +715,7 @@ export class ASN1 {
         //case 0x08: // EXTERNAL
         //case 0x09: // REAL
         case 0x0A: // ENUMERATED
-            return this.stream.parseInteger(content, content + len);
+            return this.namedValue(this.stream.parseInteger(content, content + len));
         //case 0x0B: // EMBEDDED_PDV
         case 0x0D: // RELATIVE-OID
             return this.stream.parseRelativeOID(content, content + len, maxLength);
@@ -665,7 +742,7 @@ export class ASN1 {
             return recurse(this, 'parseStringBMP', maxLength).str;
         case 0x17: // UTCTime
         case 0x18: // GeneralizedTime
-            return this.stream.parseTime(content, content + len, (this.tag.tagNumber == 0x17));
+            return this.stream.parseTime(content, content + len, (tagNumber == 0x17));
         }
         return null;
     }
@@ -777,7 +854,10 @@ export class ASN1 {
                 // drop the size prefix, e.g. "(8 byte)\n…"
                 content = content.replace(/^\(\d+ (bit|byte|elem)\)(\n|$)/, '');
                 // keep only the value for OIDs (drop description lines)
-                if (this.tag.isUniversal() && (this.tag.tagNumber == 0x06 || this.tag.tagNumber == 0x0D))
+                const isOID = this.tag.isUniversal()
+                    ? (this.tag.tagNumber == 0x06 || this.tag.tagNumber == 0x0D)
+                    : this.defType()?.name == 'OBJECT IDENTIFIER';
+                if (isOID)
                     content = content.split('\n', 1)[0];
             }
             return content;

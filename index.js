@@ -5,7 +5,7 @@ import { Base64 } from './base64.js';
 import { Hex } from './hex.js';
 import { Defs } from './defs.js';
 import { parseSchema, checkReferences } from './asn1schema.js';
-import { encodeNode, encodeInteger, buildElementTLV, defaultContent } from './encoder.js';
+import { encodeNode, encodeInteger, buildElementTLV, defaultContent, universalTags } from './encoder.js';
 import { setHandlers } from './context.js';
 import { tags } from './tags.js';
 
@@ -350,26 +350,29 @@ function nodeBytes(asn1) {
 function editValue(asn1) {
     if (!currentDer || !currentRec)
         return;
-    const isUniversal = asn1.tag.isUniversal(),
-        tn = asn1.tag.tagNumber,
-        label = asn1.def?.id || asn1.typeName();
+    const label = asn1.def?.id || asn1.typeName();
+    // effective type: the value's own universal tag, or (for implicit tags)
+    // the type resolved by the matched schema definition
+    const tn = asn1.tag.isUniversal()
+        ? asn1.tag.tagNumber
+        : universalTags[asn1.defType()?.name];
     let content;
     try {
-        if (isUniversal && (tn == 0x02 || tn == 0x0A)) { // INTEGER, ENUMERATED
-            const cur = asn1.content(Infinity).replace(/^\(\d+ bit\)\n/, '');
+        if (tn == 0x02 || tn == 0x0A) { // INTEGER, ENUMERATED
+            const cur = asn1.content(Infinity).replace(/^\(\d+ bit\)\n/, '').split(' ')[0];
             const v = prompt('New value for ' + label + ' (decimal integer):', cur);
             if (v === null) return;
             content = encodeInteger(v);
-        } else if (isUniversal && tn == 0x01) { // BOOLEAN
+        } else if (tn == 0x01) { // BOOLEAN
             const v = prompt('New value for ' + label + ' (true/false):', asn1.content());
             if (v === null) return;
             content = Uint8Array.of(/^t(rue)?$/i.test(v.trim()) ? 0xFF : 0x00);
-        } else if (isUniversal && [0x0C, 0x12, 0x13, 0x16, 0x17, 0x18, 0x1A, 0x1B].includes(tn)) {
+        } else if ([0x0C, 0x12, 0x13, 0x16, 0x17, 0x18, 0x1A, 0x1B].includes(tn)) {
             // string and time types: edit as text, encoded as UTF-8/ASCII
             const v = prompt('New value for ' + label + ' (text):', asn1.content(Infinity));
             if (v === null) return;
             content = new TextEncoder().encode(v);
-        } else { // everything else (context tags, OCTET STRING, BIT STRING, OID…): raw hex
+        } else { // everything else (OCTET STRING, BIT STRING, OID, unknown…): raw hex
             const cur = asn1.stream.hexDump(asn1.posContent(), asn1.posEnd(), 'raw');
             const v = prompt('New value for ' + label + ' (hex bytes):', cur);
             if (v === null) return;

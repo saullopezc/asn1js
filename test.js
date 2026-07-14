@@ -400,15 +400,23 @@ tests.push(new Tests('Schema', function (t) {
      'Rec ::= SET { num [0] INTEGER { one (1), two (2) } OPTIONAL, txt [1] IA5String (SIZE (1..maxLen)) }\n' +
      'END',
     '31088001 2A810341 4243', 'Rec',
-    'ok|Rec SET @0+8 (constructed): (2 elem);num INTEGER [0] @2+1: (1 byte)|*;txt IA5String [1] @5+3: (3 byte)|ABC;',
-    'module without OID, IMPLICIT tags keep field names'],
+    'ok|Rec SET @0+8 (constructed): (2 elem);num INTEGER [0] @2+1: 42;txt IA5String [1] @5+3: ABC;',
+    'module without OID, IMPLICIT tags keep field names and types'],
     ['TEST2 DEFINITIONS IMPLICIT TAGS ::= BEGIN\n' +
      'Top ::= CHOICE { rec [5] Inner }\n' +
      'Inner ::= SEQUENCE { a [0] INTEGER }\n' +
      'END',
     'A5038001 07', 'Top',
-    'ok|rec Top [5] @0+3 (constructed): (1 elem);a INTEGER [0] @2+1: (1 byte)|07;',
+    'ok|rec Top [5] @0+3 (constructed): (1 elem);a INTEGER [0] @2+1: 7;',
     'CHOICE alternative picked by implicit tag'],
+    ['TEST5 DEFINITIONS IMPLICIT TAGS ::= BEGIN\n' +
+     'Rec ::= SEQUENCE { rt [0] RType, flags [2] Flags }\n' +
+     'RType ::= INTEGER { answer (42), other (7) }\n' +
+     'Flags ::= BIT STRING { alpha (0), beta (2) }\n' +
+     'END',
+    '30078001 2A820205 A0', 'Rec',
+    'ok|Rec SEQUENCE @0+7 (constructed): (2 elem);rt RType [0] @2+1: 42 (answer);flags Flags [2] @5+2: (3 bit)|101|(alpha, beta);',
+    'named values and named bits from the schema'],
     ['TEST3 DEFINITIONS EXPLICIT TAGS ::= BEGIN\n' +
      'A ::= SEQUENCE { b Missing }\n' +
      'END',

@@ -113,7 +113,7 @@ export function encodeTLV(tagBytes, content) {
     return out;
 }
 
-const universalTags = { // keep in sync with ASN1.typeName
+export const universalTags = { // keep in sync with ASN1.typeName
     'BOOLEAN': 0x01, 'INTEGER': 0x02, 'BIT STRING': 0x03, 'OCTET STRING': 0x04,
     'NULL': 0x05, 'OBJECT IDENTIFIER': 0x06, 'ENUMERATED': 0x0A, 'UTF8String': 0x0C,
     'SEQUENCE': 0x10, 'SET': 0x11, 'NumericString': 0x12, 'PrintableString': 0x13,
