@@ -1,6 +1,7 @@
 import './theme.js';
-import { Stream } from './asn1.js';
+import { ASN1, Stream } from './asn1.js';
 import { ASN1DOM } from './dom.js';
+import { formats3gpp } from './formats3gpp.js';
 import { Base64 } from './base64.js';
 import { Hex } from './hex.js';
 import { Defs } from './defs.js';
@@ -34,12 +35,16 @@ const
     butFind = id('butFind'),
     butFindPrev = id('butFindPrev'),
     butFindNext = id('butFindNext'),
+    replaceText = id('replaceText'),
+    butReplace = id('butReplace'),
     searchInfo = id('searchInfo');
 
 const
     maxRecords = 1000000, // safety cap: malformed input must not exhaust memory
     recCacheMax = 16, // decoded trees kept for fast navigation
     maxSearchContent = 16384; // cap per-value preview built during search
+
+ASN1.typeFormatters = formats3gpp; // telco-friendly rendering of CDR fields
 
 let hash = null;
 let recOffsets = [], // start offset of each record; trees are decoded lazily
@@ -196,6 +201,109 @@ function doSearch() {
         gotoResult(0);
     else
         searchInfo.innerText = 'no matches';
+}
+function editableRepr(n) {
+    // the text form of a primitive value that can be edited and re-encoded,
+    // chosen by the effective type (same rules as editValue)
+    if (n.sub !== null)
+        return null;
+    const tn = n.tag.isUniversal() ? n.tag.tagNumber : universalTags[n.defType()?.name];
+    if (tn == 0x02 || tn == 0x0A)
+        return { kind: 'int', text: n.content(Infinity).replace(/^\(\d+ bit\)\n/, '').split(' ')[0] };
+    if ([0x0C, 0x12, 0x13, 0x16, 0x17, 0x18, 0x1A, 0x1B].includes(tn))
+        return { kind: 'text', text: n.content(Infinity) };
+    return { kind: 'hex', text: n.stream.hexDump(n.posContent(), n.posEnd(), 'raw') };
+}
+function encodeRepr(kind, text) {
+    if (kind == 'int')
+        return encodeInteger(text);
+    if (kind == 'text')
+        return new TextEncoder().encode(text);
+    return Hex.decode(text);
+}
+function collectReplacements(rec, term, repl) {
+    // finds the values of a record whose editable text contains `term`;
+    // with repl !== null it also builds the content edits for encodeNode
+    const edits = new Map();
+    let occurrences = 0, values = 0, skipped = 0;
+    (function walk(n) {
+        const r = editableRepr(n);
+        if (r && r.text.indexOf(term) >= 0) {
+            occurrences += r.text.split(term).length - 1;
+            ++values;
+            if (repl !== null)
+                try {
+                    edits.set(n, encodeRepr(r.kind, r.text.split(term).join(repl)));
+                } catch (ignore) {
+                    ++skipped; // the replacement is not valid for this type
+                }
+        }
+        if (n.sub)
+            n.sub.forEach(walk);
+    })(rec);
+    return { edits, occurrences, values, skipped };
+}
+function doReplaceAll() {
+    const term = searchText.value; // replacing is case-sensitive on purpose
+    const repl = replaceText.value;
+    if (!term || !currentDer || recOffsets.length === 0)
+        return;
+    const recordAtTransient = ri => {
+        const rec = ASN1DOM.decode(currentDer, recOffsets[ri]);
+        if (wantDef.checked)
+            Defs.match(rec, currentType);
+        return rec;
+    };
+    // pass 1 (dry run): count occurrences to confirm before touching anything
+    let occurrences = 0, values = 0;
+    const recs = new Set();
+    for (let ri = 0; ri < recOffsets.length; ++ri)
+        try {
+            const c = collectReplacements(recordAtTransient(ri), term, null);
+            if (c.occurrences) {
+                occurrences += c.occurrences;
+                values += c.values;
+                recs.add(ri);
+            }
+        } catch (ignore) { /* corrupted record: left untouched */ }
+    if (occurrences === 0) {
+        searchInfo.innerText = 'nothing to replace';
+        return;
+    }
+    if (!confirm('Replace ' + occurrences + ' occurrence(s) in ' + values + ' value(s) across ' +
+        recs.size + ' record(s) of ' + recOffsets.length + '?\n\n"' + term + '" → "' + repl + '"'))
+        return;
+    // pass 2: re-encode each affected record and rebuild the file buffer,
+    // preserving corrupted records and trailing bytes verbatim
+    const parts = [];
+    let skipped = 0;
+    parts.push(currentDer.subarray(0, recOffsets[0]));
+    for (let ri = 0; ri < recOffsets.length; ++ri) {
+        const start = recOffsets[ri];
+        const end = (ri + 1 < recOffsets.length) ? recOffsets[ri + 1] : currentDer.length;
+        let rec = null;
+        try {
+            rec = recordAtTransient(ri);
+        } catch (ignore) { /* keep raw bytes below */ }
+        if (!rec) {
+            parts.push(currentDer.subarray(start, end));
+            continue;
+        }
+        const c = collectReplacements(rec, term, repl);
+        skipped += c.skipped;
+        parts.push(c.edits.size ? encodeNode(rec, c.edits) : currentDer.subarray(start, rec.posEnd()));
+        if (rec.posEnd() < end) // trailing/undecoded bytes after the record
+            parts.push(currentDer.subarray(rec.posEnd(), end));
+    }
+    const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
+    let at = 0;
+    for (const p of parts) {
+        out.set(p, at);
+        at += p.length;
+    }
+    reload(out);
+    searchInfo.innerText = 'replaced ' + occurrences + ' occurrence(s) in ' + recs.size + ' record(s)' +
+        (skipped ? ' — ' + skipped + ' value(s) skipped (replacement not valid for their type)' : '');
 }
 function rebuildDefs() {
     currentType = null;
@@ -624,6 +732,29 @@ const butClickHandlers = {
         a.click();
         URL.revokeObjectURL(a.href);
     },
+    butExportJSON: () => {
+        if (!currentDer || recOffsets.length === 0) {
+            alert('Nothing to export: decode some data first.');
+            return;
+        }
+        // every record, decoded transiently, as one JSON array
+        const out = [];
+        for (let ri = 0; ri < recOffsets.length; ++ri)
+            try {
+                const rec = ASN1DOM.decode(currentDer, recOffsets[ri]);
+                if (wantDef.checked)
+                    Defs.match(rec, currentType);
+                out.push({ [rec.def?.id || rec.typeName()]: rec.toJSON() });
+            } catch (e) {
+                out.push({ error: 'record ' + (ri + 1) + ' cannot be decoded: ' + (e.message || e) });
+            }
+        const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (currentName ? currentName.replace(/\.[^.]*$/, '') : 'records') + '.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    },
     butExample: () => {
         console.log('Loading example:', examples.value);
         let request = new XMLHttpRequest();
@@ -659,6 +790,7 @@ recNext.onclick = () => {
 };
 wantUrl.addEventListener('change', updateHash); // applies (or clears) the hash right away
 butFind.onclick = doSearch;
+butReplace.onclick = doReplaceAll;
 butFindPrev.onclick = () => gotoResult(searchIndex - 1);
 butFindNext.onclick = () => gotoResult(searchIndex + 1);
 searchText.onkeydown = (ev) => {

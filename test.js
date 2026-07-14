@@ -7,6 +7,7 @@ import { Hex } from './hex.js';
 import { Base64 } from './base64.js';
 import { parseSchema, checkReferences } from './asn1schema.js';
 import { encodeNode, encodeInteger, buildElementTLV } from './encoder.js';
+import { formats3gpp } from './formats3gpp.js';
 import { createPatch } from 'diff';
 
 function hexOf(bytes) {
@@ -429,6 +430,26 @@ tests.push(new Tests('Schema', function (t) {
     '3100', 'Rec',
     'warnings:1|Rec SET @0+0 (constructed): (0 elem);',
     'truncated definition is reported as warning'],
+]));
+
+tests.push(new Tests('Formats 3GPP', function (t) {
+    const [key, hexBytes, expected, comment] = t;
+    let result;
+    try {
+        result = String(formats3gpp[key](Hex.decode(hexBytes)));
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, comment);
+}, [
+    ['TimeStamp', '2011111452222D0000', '2020-11-11 14:52:22 UTC-00:00', 'BCD timestamp (TS 32.298)'],
+    ['TimeStamp', '2011111452222D00', 'null', 'wrong length returns null'],
+    ['IMSI', '17040201444862F5', '714020104484265', 'TBCD digits with filler nibble'],
+    ['MSISDN', '910567048087F1', '+50764008781 (TON/NPI 91)', 'international AddressString (TS 29.002)'],
+    ['PLMN-Id', '17F420', 'MCC 714 MNC 02', '2-digit MNC (TS 24.008)'],
+    ['PLMN-Id', '170420', 'MCC 714 MNC 020', '3-digit MNC'],
+    ['iPBinV4Address', 'C86C35D4', '200.108.53.212', 'IPv4 address'],
+    ['iPBinV6Address', '20010DB8000000000000000000000001', '2001:db8:0:0:0:0:0:1', 'IPv6 address'],
 ]));
 
 tests.push(new Tests('Schema file', function () {

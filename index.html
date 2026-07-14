@@ -56,6 +56,8 @@
         <input type="button" id="butFind" value="find">
         <input type="button" id="butFindPrev" value="&#9664;">
         <input type="button" id="butFindNext" value="&#9654;">
+        <input type="text" id="replaceText" placeholder="replace with">
+        <input type="button" id="butReplace" value="replace all" title="replaces in decoded values of ALL records (case-sensitive) and re-encodes them">
         <span id="searchInfo"></span>
       </div>
     </div>
@@ -69,6 +71,7 @@
       <label title="data and schema are restored on reload; disable when working with sensitive data (the URL stays in browser history)"><input type="checkbox" id="wantUrl" checked="checked"> session in URL</label>
       <input id="butDecode" type="button" value="decode">
       <input id="butDownload" type="button" value="save file">
+      <input id="butExportJSON" type="button" value="export JSON" title="downloads every record of the file as a JSON array (schema keys when matched)">
       <br><br>
       <table>
         <tr><td>Drag or load file:</td><td><input type="file" id="file"></td></tr>
