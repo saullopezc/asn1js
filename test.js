@@ -5,7 +5,16 @@ import { ASN1, Stream } from './asn1.js';
 import { Defs } from './defs.js';
 import { Hex } from './hex.js';
 import { Base64 } from './base64.js';
+import { parseSchema, checkReferences } from './asn1schema.js';
+import { encodeNode, encodeInteger, buildElementTLV } from './encoder.js';
 import { createPatch } from 'diff';
+
+function hexOf(bytes) {
+    let s = '';
+    for (const b of bytes)
+        s += Stream.hexByte(b);
+    return s;
+}
 
 const all = (process.argv[2] == 'all');
 
@@ -237,6 +246,231 @@ tests.push(new Tests('Length', function (t) {
     ['847FFFFFFF', 0x7FFFFFFF, 'Long form length 2^31-1'],
     ['84FFFFFFFF', 0xFFFFFFFF, 'Long form length 2^32-1'],
     ['87FFFFFFFFFFFFFF', 'Exception:\nError: Length over 48 bits not supported at position 0', 'Long form length > 2^48'],
+]));
+
+tests.push(new Tests('Scan records', function (t) {
+    const [input, expected, comment] = t;
+    let result;
+    try {
+        const scan = ASN1.scanRecords(Hex.decode(input), 0, t[3] ?? Infinity);
+        result = scan.offsets.join(',') + (scan.error ? '|error@' + scan.error.offset : '');
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, comment);
+}, [
+    ['020101020102020103', '0,3,6', 'three concatenated records'],
+    ['30800201050000020107', '0,7', 'BER indefinite length record then INTEGER'],
+    ['0201', '|error@0', 'truncated single record'],
+    ['0201010202', '0|error@3', 'valid record then truncated one'],
+    ['048477777777', '|error@0', 'length past end of stream'],
+    ['020101020102', '0|error@3', 'safety cap on record count', 1],
+]));
+
+tests.push(new Tests('Multi-record', function (t) {
+    const input = t[0],
+        expected = t[1],
+        comment = t[2];
+    let result;
+    try {
+        const der = Hex.decode(input);
+        const contents = [];
+        let pos = 0;
+        while (pos < der.length) {
+            const node = ASN1.decode(der, pos);
+            contents.push(node.content());
+            pos = node.posEnd();
+        }
+        result = contents.join('|');
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, comment);
+}, [
+    ['020101020102020103', '1|2|3', 'three concatenated INTEGERs'],
+    ['300602010102017F020103', '(2 elem)|3', 'SEQUENCE followed by INTEGER'],
+    ['30800201010000020105', '(1 elem)|5', 'BER indefinite length followed by INTEGER'],
+    ['02010102', 'Exception:\nError: Requesting byte offset 4 on a stream of length 4', 'truncated second record'],
+]));
+
+tests.push(new Tests('Encoder', function (t) {
+    const [hexIn, path, newContentHex, expected, comment] = t;
+    let result;
+    try {
+        const node = ASN1.decode(Hex.decode(hexIn));
+        let edits;
+        if (path) {
+            let target = node;
+            for (const i of path)
+                target = target.sub[i];
+            edits = new Map([[target, Hex.decode(newContentHex)]]);
+        }
+        result = hexOf(encodeNode(node, edits));
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, comment);
+}, [
+    ['300602010102017F', null, null, '300602010102017F', 'DER round-trip is identical'],
+    ['30800201050000', null, null, '3003020105', 'BER indefinite length becomes DER definite'],
+    ['16810D7465737431407273612E636F6D', null, null, '160D7465737431407273612E636F6D', 'non-minimal length is normalized'],
+    ['300602010102017F', [0], '03E8', '3007020203E802017F', 'editing a value updates parent lengths'],
+    ['A503800107', [0], '0102', 'A50480020102', 'edit inside implicit-tagged constructed'],
+]));
+
+tests.push(new Tests('Structural edits', function (t) {
+    let result;
+    try {
+        result = t[0]();
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    if (t[1] instanceof RegExp)
+        result = t[1].test(result) ? null : result;
+    this.checkResult(result, t[1], t[2]);
+}, [
+    [() => {
+        const n = ASN1.decode(Hex.decode('3003020105'));
+        n.sub.splice(1, 0, { rawBytes: Hex.decode('020107') });
+        return hexOf(encodeNode(n));
+    }, '3006020105020107', 'insert a raw sibling (duplicate/add)'],
+    [() => {
+        const n = ASN1.decode(Hex.decode('300602010102017F'));
+        n.sub.splice(0, 1);
+        return hexOf(encodeNode(n));
+    }, '300302017F', 'remove a child'],
+    [() => hexOf(buildElementTLV(
+        { id: 'x', name: '[5]', type: 'tag', 'class': 'CONTEXT', explicit: false, content: [{ name: '', type: { name: 'INTEGER', type: 'builtin' } }] })),
+    '850100', 'implicit tagged INTEGER gets default 0'],
+    [() => hexOf(buildElementTLV(
+        { id: 'x', name: '[64]', type: 'tag', 'class': 'CONTEXT', explicit: false, content: [{ name: '', type: { name: 'Foo', type: 'defined' } }] },
+        () => ({ name: 'IA5String', type: 'builtin' }))),
+    '9F4000', 'long-form tag with resolved defined type'],
+    [() => hexOf(buildElementTLV(
+        { id: 'x', name: '[0]', type: 'tag', 'class': 'CONTEXT', explicit: true, content: [{ name: '', type: { name: 'SEQUENCE', type: 'builtin', content: [] } }] })),
+    'A0023000', 'explicit tag wraps an empty SEQUENCE'],
+    [() => hexOf(buildElementTLV(
+        { id: 'x', name: 'PDPAddress', type: 'defined' },
+        () => ({ name: 'CHOICE', type: 'builtin', content: [] }))),
+    /^Exception:\nError: cannot build a value of type CHOICE/, 'CHOICE fields cannot be auto-built'],
+]));
+
+tests.push(new Tests('Encode integer', function (t) {
+    const [value, expected] = t;
+    let result;
+    try {
+        result = hexOf(encodeInteger(value));
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, 'encodeInteger(' + value + ')');
+}, [
+    ['0', '00'],
+    ['127', '7F'],
+    ['128', '0080'],
+    ['256', '0100'],
+    ['-128', '80'],
+    ['-129', 'FF7F'],
+    ['65537', '010001'],
+    ['-1', 'FF'],
+]));
+
+tests.push(new Tests('Schema', function (t) {
+    const [schema, hexDER, rootType, expected, comment] = t;
+    let result;
+    try {
+        const mod = parseSchema(schema, 'inline test');
+        Defs.RFC[mod.oid || mod.name] = mod;
+        const missing = checkReferences(mod);
+        const node = ASN1.decode(Hex.decode(hexDER));
+        Defs.match(node, Defs.moduleAndType(mod, rootType));
+        const flags = [];
+        if (missing.length) flags.push('missing:' + missing.join(','));
+        if (mod.warnings) flags.push('warnings:' + mod.warnings.length);
+        result = (flags.join(';') || 'ok') +
+            '|' + node.toPrettyString().replace(/\n\s*/g, ';');
+        delete Defs.RFC[mod.oid || mod.name];
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, comment);
+}, [
+    ['TEST DEFINITIONS IMPLICIT TAGS ::= BEGIN\n' +
+     'maxLen INTEGER ::= 20\n' +
+     'Rec ::= SET { num [0] INTEGER { one (1), two (2) } OPTIONAL, txt [1] IA5String (SIZE (1..maxLen)) }\n' +
+     'END',
+    '31088001 2A810341 4243', 'Rec',
+    'ok|Rec SET @0+8 (constructed): (2 elem);num INTEGER [0] @2+1: 42;txt IA5String [1] @5+3: ABC;',
+    'module without OID, IMPLICIT tags keep field names and types'],
+    ['TEST2 DEFINITIONS IMPLICIT TAGS ::= BEGIN\n' +
+     'Top ::= CHOICE { rec [5] Inner }\n' +
+     'Inner ::= SEQUENCE { a [0] INTEGER }\n' +
+     'END',
+    'A5038001 07', 'Top',
+    'ok|rec Top [5] @0+3 (constructed): (1 elem);a INTEGER [0] @2+1: 7;',
+    'CHOICE alternative picked by implicit tag'],
+    ['TEST5 DEFINITIONS IMPLICIT TAGS ::= BEGIN\n' +
+     'Rec ::= SEQUENCE { rt [0] RType, flags [2] Flags }\n' +
+     'RType ::= INTEGER { answer (42), other (7) }\n' +
+     'Flags ::= BIT STRING { alpha (0), beta (2) }\n' +
+     'END',
+    '30078001 2A820205 A0', 'Rec',
+    'ok|Rec SEQUENCE @0+7 (constructed): (2 elem);rt RType [0] @2+1: 42 (answer);flags Flags [2] @5+2: (3 bit)|101|(alpha, beta);',
+    'named values and named bits from the schema'],
+    ['TEST3 DEFINITIONS EXPLICIT TAGS ::= BEGIN\n' +
+     'A ::= SEQUENCE { b Missing }\n' +
+     'END',
+    '3000', 'A',
+    'missing:Missing|A SEQUENCE @0+0 (constructed): (0 elem);',
+    'unresolved type reference is reported'],
+    ['TEST4 DEFINITIONS IMPLICIT TAGS ::= BEGIN\n' +
+     'Rec ::= SET { a [0] INTEGER\n' +
+     'END',
+    '3100', 'Rec',
+    'warnings:1|Rec SET @0+0 (constructed): (0 elem);',
+    'truncated definition is reported as warning'],
+]));
+
+tests.push(new Tests('Schema file', function () {
+    // real-world schema downloaded from the internet (vendored fixture):
+    // exercises the same code path used when a user loads an .asn file
+    let result;
+    try {
+        const mod = parseSchema(fs.readFileSync('examples/rfc4120-KerberosV5Spec2.asn', 'utf8'), 'rfc4120');
+        const missing = checkReferences(mod);
+        const ticket = mod.types.Ticket;
+        result = [
+            mod.name, mod.oid, mod.tagDefault,
+            Object.keys(mod.types).length + ' types',
+            (mod.warnings ?? []).length + ' warnings',
+            missing.length + ' unresolved',
+            'Ticket=' + ticket.type.name + '/' + (ticket.type.explicit ? 'explicit' : 'implicit'),
+        ].join('|');
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result,
+        'KerberosV5Spec2|1.3.6.1.5.2.4.2|EXPLICIT|56 types|0 warnings|0 unresolved|Ticket=Application 1/explicit',
+        'parse RFC 4120 Kerberos module (real-world schema)');
+}, [
+    [0],
+]));
+
+tests.push(new Tests('JSON', function (t) {
+    const [hexDER, expected, comment] = t;
+    let result;
+    try {
+        result = JSON.stringify(ASN1.decode(Hex.decode(hexDER)));
+    } catch (e) {
+        result = 'Exception:\n' + e;
+    }
+    this.checkResult(result, expected, comment);
+}, [
+    ['0203010001', '"65537"', 'primitive INTEGER'],
+    ['04024142', '"AB"', 'octet string drops size prefix'],
+    ['06092A864886F70D010105', '"1.2.840.113549.1.1.5"', 'OID drops description lines'],
+    ['3009020101160454657374', '{"INTEGER":"1","IA5String":"Test"}', 'constructed with distinct keys'],
+    ['300602010102017F', '["1","127"]', 'repeated keys become an array'],
 ]));
 
 tests.push(new Tests('Dump of examples', function () {

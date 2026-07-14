@@ -22,6 +22,8 @@
   "homepage": "https://lapo.it/asn1js/",
   "files": [
     "asn1.js",
+    "asn1schema.js",
+    "encoder.js",
     "base64.js",
     "hex.js",
     "dom.js",
@@ -31,7 +33,7 @@
     "dumpASN1.js"
   ],
   "scripts": {
-    "lint": "npx eslint asn1.js base64.js hex.js dom.js defs.js oids.js rfcdef.js tags.js context.js index.js parseRFC.js dumpASN1.js test.js testDefs.js vite.config.js theme.js",
+    "lint": "npx eslint asn1.js asn1schema.js encoder.js base64.js hex.js dom.js defs.js oids.js rfcdef.js tags.js context.js index.js parseRFC.js dumpASN1.js test.js testDefs.js vite.config.js theme.js",
     "lint-action": "npx @action-validator/cli .github/workflows/node.js.yml",
     "build": "vite build",
     "serve": "npx -p local-web-server ws",

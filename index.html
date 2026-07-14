@@ -15,6 +15,12 @@
     <button id="btnCopyB64">Copy Base64</button>
     <button id="btnCopyTree">Copy subtree</button>
     <button id="btnCopyValue">Copy value</button>
+    <button id="btnCopyJSON">Copy JSON</button>
+    <button id="btnSaveJSON">Download JSON</button>
+    <button id="btnEdit">Edit value</button>
+    <button id="btnDuplicate">Duplicate</button>
+    <button id="btnDelete">Delete</button>
+    <button id="btnAddField">Add field&#8230;</button>
   </div>
   <header>
     <div class="title">
@@ -33,8 +39,25 @@
   </header>
   <div id="main-page">
     <div>
+      <div id="recnav" style="display: none">
+        <button id="recPrev" type="button">&#9664;</button>
+        <span id="recLabel"></span>
+        <button id="recNext" type="button">&#9654;</button>
+      </div>
       <div id="dump"></div>
       <div id="tree"></div>
+      <div id="searchbar">
+        <input type="text" id="searchText" placeholder="find in all records">
+        <select id="searchIn" title="where to look for the text">
+          <option value="values">values</option>
+          <option value="names">field names</option>
+          <option value="all">values + names</option>
+        </select>
+        <input type="button" id="butFind" value="find">
+        <input type="button" id="butFindPrev" value="&#9664;">
+        <input type="button" id="butFindNext" value="&#9654;">
+        <span id="searchInfo"></span>
+      </div>
     </div>
     <form>
       <textarea id="area" rows="8" placeholder="Paste hex or base64 or PEM encoded ASN.1 BER or DER structures here, or load a file."></textarea>
@@ -43,7 +66,9 @@
       <label title="can be slow with big files"><input type="checkbox" id="wantHex" checked="checked"> with hex dump</label>
       <label title="can be slow with big files"><input type="checkbox" id="trimHex" checked="checked"> trim big chunks</label>
       <label title="can be slow with big files"><input type="checkbox" id="wantDef" checked="checked"> with definitions</label>
+      <label title="data and schema are restored on reload; disable when working with sensitive data (the URL stays in browser history)"><input type="checkbox" id="wantUrl" checked="checked"> session in URL</label>
       <input id="butDecode" type="button" value="decode">
+      <input id="butDownload" type="button" value="save file">
       <br><br>
       <table>
         <tr><td>Drag or load file:</td><td><input type="file" id="file"></td></tr>
@@ -66,6 +91,7 @@
           <input id="butExample" type="button" value="load"><br>
         </td></tr>
         <tr><td>Definitions:</td><td><select id="definitions"></select></td></tr>
+        <tr><td>User schema:</td><td><input type="file" id="schemaFile" accept=".asn,.asn1,.txt"><br><span id="schemaStatus"></span></td></tr>
       </table>
     </form>
     <br>

@@ -1,6 +1,6 @@
 CertificateList SEQUENCE @0+352 (constructed): (3 elem)
   tbsCertList TBSCertList SEQUENCE @4+202 (constructed): (7 elem)
-    version Version INTEGER @7+1: 1
+    version Version INTEGER @7+1: 1 (v2)
     signature AlgorithmIdentifier SEQUENCE @10+13 (constructed): (2 elem)
       algorithm OBJECT_IDENTIFIER @12+9: 1.2.840.113549.1.1.5|sha1WithRSAEncryption|PKCS #1
       parameters ANY NULL @23+0

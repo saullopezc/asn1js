@@ -15,28 +15,46 @@
 
 import { rfcdef } from './rfcdef.js';
 
+function searchTypeCached(name, stats) {
+    // type resolution is a linear scan over every module: cache it per match
+    const cache = stats ? (stats.typeCache ?? (stats.typeCache = {})) : null;
+    if (cache && name in cache)
+        return cache[name];
+    const r = Defs.searchType(name);
+    if (cache)
+        cache[name] = r;
+    return r;
+}
+
 function translate(def, tn, stats) {
-    if (def?.type == 'tag' && !def.explicit)
-        // def.type = def.content[0].type;
-        def = def.content[0].type;
+    if (def?.type == 'tag' && !def.explicit) {
+        // IMPLICIT tag: continue with the inner type, but keep the element id,
+        // its optionality, and the tag name (the encoded value shows the tag)
+        const el = def;
+        def = Object.assign({}, el.content[0].type, { id: el.id, tagName: el.name });
+        if ('optional' in el)
+            def.optional = el.optional;
+    }
     if (def?.definedBy)
         try {
             // hope current OIDs contain the type name (will need to parse from RFC itself)
-            def = Defs.searchType(firstUpper(stats.defs[def.definedBy][1]));
+            def = searchTypeCached(firstUpper(stats.defs[def.definedBy][1]), stats);
         } catch (ignore) { /*ignore*/ }
     while (def?.type == 'defined' || def?.type?.type == 'defined') {
         const name = def?.type?.type ? def.type.name : def.name;
         def = Object.assign({}, def);
-        def.type = Defs.searchType(name).type;
+        def.type = searchTypeCached(name, stats).type;
     }
     if (def?.name == 'CHOICE' || def?.type?.name == 'CHOICE') {
         for (let c of def.content ?? def.type.content) {
-            if (tn != c.type.name && tn != c.name)
-                c = translate(c);
-            if (tn == c.type.name || tn == c.name) {
+            if (c.type == 'tag' || (tn != c.type.name && tn != c.name))
+                c = translate(c, tn, stats);
+            if (tn == c.type.name || tn == c.name || tn == c.tagName) {
                 def = Object.assign({}, def);
                 if (c.id) // show the CHOICE id, but add it to existing one if present
                     def.id = def.id ? def.id + ' ' + c.id : c.id;
+                if (c.tagName)
+                    def.tagName = c.tagName;
                 def.type = c.type.name ? c.type : c;
                 break;
             }
@@ -75,7 +93,7 @@ export class Defs {
         ++stats.total;
         if (def?.type) {
             // if (def.id || def.name) ++stats.recognized;
-            if (tn == def.type.name || tn == def.name || def.name == 'ANY')
+            if (tn == def.type.name || tn == def.name || tn == def.tagName || def.name == 'ANY')
                 ++stats.recognized;
             else if (def.name)
                 def = Object.assign({ mismatch: 1 }, def);
@@ -99,7 +117,7 @@ export class Defs {
                                 // type = type.type;
                                 type = Object.assign({}, type.type, {id: type.id});
                             if (type.type == 'defined') {
-                                let t2 = translate(type, tn);
+                                let t2 = translate(type, tn, stats);
                                 if (t2.type.name == tn) break; // exact match
                                 if (t2.type.name == 'ANY') break; // good enough
                             }
@@ -114,7 +132,7 @@ export class Defs {
                             stats.defs[type.id] = v;
                         } else if (type?.definedBy && stats.defs?.[type.definedBy]?.[1]) { // hope current OIDs contain the type name (will need to parse from RFC itself)
                             try {
-                                type = Defs.searchType(firstUpper(stats.defs[type.definedBy][1]));
+                                type = searchTypeCached(firstUpper(stats.defs[type.definedBy][1]), stats);
                             } catch (ignore) { /*ignore*/ }
                         }
                     }

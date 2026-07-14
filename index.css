@@ -215,6 +215,32 @@ header {
 .spaces {
     font-size: 0px;
 }
+#schemaStatus {
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+#schemaStatus.schema-ok   { color: #3fb950; }
+#schemaStatus.schema-warn { color: #d29922; }
+#schemaStatus.schema-err  { color: #f85149; }
+#recnav {
+    margin-bottom: 0.5em;
+}
+#recnav span {
+    margin: 0 0.5em;
+}
+#searchbar {
+    margin-top: 0.5em;
+}
+#searchbar span {
+    margin-left: 0.5em;
+}
+.head.found {
+    outline: 1px dashed var(--link-color);
+}
+.head.foundCurrent {
+    background-color: var(--hover-bg-color);
+    outline: 2px solid var(--link-color);
+}
 #tree {
     font-family: monospace;
 }
