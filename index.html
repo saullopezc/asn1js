@@ -56,6 +56,7 @@
         <input type="button" id="butFind" value="find">
         <input type="button" id="butFindPrev" value="&#9664;">
         <input type="button" id="butFindNext" value="&#9654;">
+        <input type="button" id="butFilter" value="filter" title="navigate only the records that contain the text (toggle)">
         <input type="text" id="replaceText" placeholder="replace with">
         <input type="button" id="butReplace" value="replace all" title="replaces in decoded values of ALL records (case-sensitive) and re-encodes them">
         <span id="searchInfo"></span>
@@ -72,6 +73,7 @@
       <input id="butDecode" type="button" value="decode">
       <input id="butDownload" type="button" value="save file">
       <input id="butExportJSON" type="button" value="export JSON" title="downloads every record of the file as a JSON array (schema keys when matched)">
+      <input id="butStats" type="button" value="stats" title="record counts, value frequencies and numeric totals across the whole file">
       <br><br>
       <table>
         <tr><td>Drag or load file:</td><td><input type="file" id="file"></td></tr>
