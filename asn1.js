@@ -624,6 +624,20 @@ export class ASN1 {
         if (!this.tag.isUniversal()) {
             if (this.sub !== null)
                 return '(' + this.sub.length + ' elem)';
+            // application-registered formatters (ASN1.typeFormatters), keyed by
+            // the schema type or field names (e.g. 3GPP TimeStamp/IMSI in CDRs)
+            if (ASN1.typeFormatters && this.def && !this.def.mismatch) {
+                const names = [this.def.name].concat(this.def.id ? this.def.id.split(' ') : []);
+                for (const name of names) {
+                    const format = name && ASN1.typeFormatters[name];
+                    if (format)
+                        try {
+                            const s = format(this.contentBytes());
+                            if (s != null)
+                                return s;
+                        } catch (ignore) { /* fall through to default rendering */ }
+                }
+            }
             const tagNumber = universalTypeTags[this.defType()?.name];
             if (tagNumber !== undefined)
                 try {
@@ -639,6 +653,19 @@ export class ASN1 {
             return '(' + d1.size + ' byte)\n' + d1.str;
         }
         return this.contentUniversal(this.tag.tagNumber, maxLength);
+    }
+
+    /**
+     * The content octets of the node, as a copied Uint8Array.
+     * @returns {Uint8Array} the content bytes
+     */
+    contentBytes() {
+        const start = this.posContent(),
+            end = this.posEnd();
+        const b = new Uint8Array(end - start);
+        for (let i = start; i < end; ++i)
+            b[i - start] = this.stream.get(i);
+        return b;
     }
 
     /**
@@ -1034,3 +1061,7 @@ export class ASN1 {
     }
 
 }
+
+// optional registry of application formatters used by content():
+// { 'TypeOrFieldName': (contentBytes) => string | null }
+ASN1.typeFormatters = null;

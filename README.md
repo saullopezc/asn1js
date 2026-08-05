@@ -78,6 +78,36 @@ You can dump an ASN.1 structure from the command line using the following comman
 npx @lapo/asn1js ed25519.cer
 ```
 
+The CLI accepts a filename, a `data:base64,…` URI, or `-` to read from stdin,
+and understands files with **many concatenated records** (e.g. telco CDR files):
+every record is dumped, or exported with `--json`.
+
+| Option | Description |
+|--------|-------------|
+| `--schema file.asn` | parse and validate a user ASN.1 module (syntax errors report line:column; unresolved references are warned) and use it to name the fields |
+| `--type TypeName` | root type to match (default: the best-scoring type of the schema and the bundled RFC definitions) |
+| `--json` | print every record as one JSON array on stdout — informational messages go to stderr, so the output can be piped |
+
+Examples:
+
+```sh
+# dump a CDR file with field names from your own schema
+node dumpASN1.js --schema charging.asn --type GPRSRecord file.asn1
+
+# batch-export to JSON and process with jq
+node dumpASN1.js --schema charging.asn --json file.asn1 | jq '.[].pGWRecord.servedIMSI'
+
+# convert every file of a directory
+for f in input/*.asn1; do
+    node dumpASN1.js --schema charging.asn --json "$f" > "out/$(basename "$f").json"
+done
+```
+
+Values of schema-matched fields are rendered by their real type (integers,
+strings, dates, named values like `0 (normalRelease)`), including common 3GPP
+conventions: BCD timestamps, TBCD digits (IMSI/IMEI), AddressString (MSISDN),
+PLMN-Id and binary IPv4/IPv6 addresses.
+
 ISC license
 -----------
 

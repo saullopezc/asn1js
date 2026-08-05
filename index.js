@@ -1,6 +1,7 @@
 import './theme.js';
-import { Stream } from './asn1.js';
+import { ASN1, Stream } from './asn1.js';
 import { ASN1DOM } from './dom.js';
+import { formats3gpp } from './formats3gpp.js';
 import { Base64 } from './base64.js';
 import { Hex } from './hex.js';
 import { Defs } from './defs.js';
@@ -34,12 +35,17 @@ const
     butFind = id('butFind'),
     butFindPrev = id('butFindPrev'),
     butFindNext = id('butFindNext'),
+    replaceText = id('replaceText'),
+    butReplace = id('butReplace'),
+    butFilter = id('butFilter'),
     searchInfo = id('searchInfo');
 
 const
     maxRecords = 1000000, // safety cap: malformed input must not exhaust memory
     recCacheMax = 16, // decoded trees kept for fast navigation
     maxSearchContent = 16384; // cap per-value preview built during search
+
+ASN1.typeFormatters = formats3gpp; // telco-friendly rendering of CDR fields
 
 let hash = null;
 let recOffsets = [], // start offset of each record; trees are decoded lazily
@@ -54,7 +60,8 @@ let recOffsets = [], // start offset of each record; trees are decoded lazily
     currentSchemaText = null,
     currentSchemaName = null,
     searchResults = [], // {ri, path}: node paths, valid across re-renders
-    searchIndex = -1;
+    searchIndex = -1,
+    filterList = null; // sorted record indexes matching the active filter
 
 function recordAt(i) {
     let r = recCache.get(i);
@@ -107,9 +114,17 @@ function show(asn1) {
 }
 function showCurrent() {
     recnav.style.display = (recOffsets.length > 1) ? '' : 'none';
-    recLabel.innerText = 'record ' + (recIndex + 1) + ' of ' + recOffsets.length;
-    recPrev.disabled = (recIndex === 0);
-    recNext.disabled = (recIndex === recOffsets.length - 1);
+    let label = 'record ' + (recIndex + 1) + ' of ' + recOffsets.length;
+    if (filterList) {
+        const pos = filterList.indexOf(recIndex);
+        label += ' — filtered ' + (pos >= 0 ? (pos + 1) : '·') + ' of ' + filterList.length;
+        recPrev.disabled = !filterList.some(ri => ri < recIndex);
+        recNext.disabled = !filterList.some(ri => ri > recIndex);
+    } else {
+        recPrev.disabled = (recIndex === 0);
+        recNext.disabled = (recIndex === recOffsets.length - 1);
+    }
+    recLabel.innerText = label;
     try {
         currentRec = recordAt(recIndex);
     } catch (e) { // lazily-decoded record may turn out corrupted
@@ -148,6 +163,68 @@ function gotoResult(i) {
         n.head.scrollIntoView({ block: 'center' });
     }
 }
+function nodeHay(n, scope) {
+    // the text a node offers to search/filter, per scope: 'values' | 'names' | 'all'
+    let hay = '';
+    if (scope != 'values') {
+        hay += n.typeName();
+        if (n.def?.id) hay += ' ' + n.def.id;
+        if (n.def?.name) hay += ' ' + n.def.name;
+    }
+    if (scope != 'names')
+        try {
+            const c = n.content(maxSearchContent);
+            if (c !== null) hay += ' ' + c;
+        } catch (ignore) { /*ignore*/ }
+    return hay;
+}
+function recordMatches(rec, term, scope) {
+    let found = false;
+    (function walk(n) {
+        if (found)
+            return;
+        if (nodeHay(n, scope).toLowerCase().indexOf(term) >= 0) {
+            found = true;
+            return;
+        }
+        if (n.sub)
+            n.sub.forEach(walk);
+    })(rec);
+    return found;
+}
+function doFilter() {
+    if (filterList) { // toggle off
+        filterList = null;
+        butFilter.value = 'filter';
+        searchInfo.innerText = '';
+        if (recOffsets.length)
+            showCurrent();
+        return;
+    }
+    const term = searchText.value.trim().toLowerCase();
+    if (!term || recOffsets.length === 0)
+        return;
+    const scope = searchIn.value;
+    const list = [];
+    for (let ri = 0; ri < recOffsets.length; ++ri)
+        try {
+            const rec = (ri === recIndex && currentRec) ? currentRec : ASN1DOM.decode(currentDer, recOffsets[ri]);
+            if (wantDef.checked)
+                Defs.match(rec, currentType);
+            if (recordMatches(rec, term, scope))
+                list.push(ri);
+        } catch (ignore) { /* corrupted record: not part of the filter */ }
+    if (list.length === 0) {
+        searchInfo.innerText = 'no records match the filter';
+        return;
+    }
+    filterList = list;
+    butFilter.value = 'unfilter';
+    if (!list.includes(recIndex))
+        recIndex = list[0];
+    showCurrent();
+    searchInfo.innerText = 'filter: ' + list.length + ' of ' + recOffsets.length + ' records';
+}
 function doSearch() {
     const term = searchText.value.trim().toLowerCase();
     searchResults = [];
@@ -171,18 +248,7 @@ function doSearch() {
             Defs.match(rec, currentType);
         const scope = searchIn.value; // 'values' | 'names' | 'all'
         (function walk(n) {
-            let hay = '';
-            if (scope != 'values') {
-                hay += n.typeName();
-                if (n.def?.id) hay += ' ' + n.def.id;
-                if (n.def?.name) hay += ' ' + n.def.name;
-            }
-            if (scope != 'names')
-                try {
-                    const c = n.content(maxSearchContent);
-                    if (c !== null) hay += ' ' + c;
-                } catch (ignore) { /*ignore*/ }
-            if (hay.toLowerCase().indexOf(term) >= 0)
+            if (nodeHay(n, scope).toLowerCase().indexOf(term) >= 0)
                 searchResults.push({ ri, path: path.slice() });
             if (n.sub)
                 n.sub.forEach((s, i) => {
@@ -196,6 +262,109 @@ function doSearch() {
         gotoResult(0);
     else
         searchInfo.innerText = 'no matches';
+}
+function editableRepr(n) {
+    // the text form of a primitive value that can be edited and re-encoded,
+    // chosen by the effective type (same rules as editValue)
+    if (n.sub !== null)
+        return null;
+    const tn = n.tag.isUniversal() ? n.tag.tagNumber : universalTags[n.defType()?.name];
+    if (tn == 0x02 || tn == 0x0A)
+        return { kind: 'int', text: n.content(Infinity).replace(/^\(\d+ bit\)\n/, '').split(' ')[0] };
+    if ([0x0C, 0x12, 0x13, 0x16, 0x17, 0x18, 0x1A, 0x1B].includes(tn))
+        return { kind: 'text', text: n.content(Infinity) };
+    return { kind: 'hex', text: n.stream.hexDump(n.posContent(), n.posEnd(), 'raw') };
+}
+function encodeRepr(kind, text) {
+    if (kind == 'int')
+        return encodeInteger(text);
+    if (kind == 'text')
+        return new TextEncoder().encode(text);
+    return Hex.decode(text);
+}
+function collectReplacements(rec, term, repl) {
+    // finds the values of a record whose editable text contains `term`;
+    // with repl !== null it also builds the content edits for encodeNode
+    const edits = new Map();
+    let occurrences = 0, values = 0, skipped = 0;
+    (function walk(n) {
+        const r = editableRepr(n);
+        if (r && r.text.indexOf(term) >= 0) {
+            occurrences += r.text.split(term).length - 1;
+            ++values;
+            if (repl !== null)
+                try {
+                    edits.set(n, encodeRepr(r.kind, r.text.split(term).join(repl)));
+                } catch (ignore) {
+                    ++skipped; // the replacement is not valid for this type
+                }
+        }
+        if (n.sub)
+            n.sub.forEach(walk);
+    })(rec);
+    return { edits, occurrences, values, skipped };
+}
+function doReplaceAll() {
+    const term = searchText.value; // replacing is case-sensitive on purpose
+    const repl = replaceText.value;
+    if (!term || !currentDer || recOffsets.length === 0)
+        return;
+    const recordAtTransient = ri => {
+        const rec = ASN1DOM.decode(currentDer, recOffsets[ri]);
+        if (wantDef.checked)
+            Defs.match(rec, currentType);
+        return rec;
+    };
+    // pass 1 (dry run): count occurrences to confirm before touching anything
+    let occurrences = 0, values = 0;
+    const recs = new Set();
+    for (let ri = 0; ri < recOffsets.length; ++ri)
+        try {
+            const c = collectReplacements(recordAtTransient(ri), term, null);
+            if (c.occurrences) {
+                occurrences += c.occurrences;
+                values += c.values;
+                recs.add(ri);
+            }
+        } catch (ignore) { /* corrupted record: left untouched */ }
+    if (occurrences === 0) {
+        searchInfo.innerText = 'nothing to replace';
+        return;
+    }
+    if (!confirm('Replace ' + occurrences + ' occurrence(s) in ' + values + ' value(s) across ' +
+        recs.size + ' record(s) of ' + recOffsets.length + '?\n\n"' + term + '" → "' + repl + '"'))
+        return;
+    // pass 2: re-encode each affected record and rebuild the file buffer,
+    // preserving corrupted records and trailing bytes verbatim
+    const parts = [];
+    let skipped = 0;
+    parts.push(currentDer.subarray(0, recOffsets[0]));
+    for (let ri = 0; ri < recOffsets.length; ++ri) {
+        const start = recOffsets[ri];
+        const end = (ri + 1 < recOffsets.length) ? recOffsets[ri + 1] : currentDer.length;
+        let rec = null;
+        try {
+            rec = recordAtTransient(ri);
+        } catch (ignore) { /* keep raw bytes below */ }
+        if (!rec) {
+            parts.push(currentDer.subarray(start, end));
+            continue;
+        }
+        const c = collectReplacements(rec, term, repl);
+        skipped += c.skipped;
+        parts.push(c.edits.size ? encodeNode(rec, c.edits) : currentDer.subarray(start, rec.posEnd()));
+        if (rec.posEnd() < end) // trailing/undecoded bytes after the record
+            parts.push(currentDer.subarray(rec.posEnd(), end));
+    }
+    const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
+    let at = 0;
+    for (const p of parts) {
+        out.set(p, at);
+        at += p.length;
+    }
+    reload(out);
+    searchInfo.innerText = 'replaced ' + occurrences + ' occurrence(s) in ' + recs.size + ' record(s)' +
+        (skipped ? ' — ' + skipped + ' value(s) skipped (replacement not valid for their type)' : '');
 }
 function rebuildDefs() {
     currentType = null;
@@ -525,6 +694,8 @@ export function decode(der, offset) {
     searchResults = []; // decoded trees are rebuilt: previous results are stale
     searchIndex = -1;
     searchInfo.innerText = '';
+    filterList = null;
+    butFilter.value = 'filter';
     try {
         // index all concatenated structures (e.g. CDR files contain many
         // records) WITHOUT decoding them: trees are built lazily per record
@@ -609,6 +780,8 @@ const butClickHandlers = {
         searchResults = [];
         searchIndex = -1;
         searchInfo.innerText = '';
+        filterList = null;
+        butFilter.value = 'filter';
         recnav.style.display = 'none';
         updateHash(); // keeps the loaded schema in the URL, drops the data
     },
@@ -621,6 +794,116 @@ const butClickHandlers = {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = currentName || 'data.der';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    },
+    butStats: () => {
+        if (!currentDer || recOffsets.length === 0) {
+            alert('Nothing to analyze: decode some data first.');
+            return;
+        }
+        const roots = {}, // root name -> count
+            named = {}, // field -> {rendered value -> count}
+            numeric = {}; // field -> {count, min, max, sum}
+        let bad = 0;
+        for (let ri = 0; ri < recOffsets.length; ++ri) {
+            let rec;
+            try {
+                rec = ASN1DOM.decode(currentDer, recOffsets[ri]);
+            } catch (ignore) {
+                ++bad;
+                continue;
+            }
+            if (wantDef.checked)
+                Defs.match(rec, currentType);
+            const rootName = rec.def?.id || rec.typeName();
+            roots[rootName] = (roots[rootName] || 0) + 1;
+            (function walk(n) {
+                if (n.sub) {
+                    n.sub.forEach(walk);
+                    return;
+                }
+                const tn = n.tag.isUniversal() ? n.tag.tagNumber : universalTags[n.defType()?.name];
+                if (tn != 0x02 && tn != 0x0A)
+                    return; // only INTEGER/ENUMERATED fields are aggregated
+                const label = n.def?.id || n.typeName();
+                let c;
+                try {
+                    c = n.content(Infinity);
+                } catch (ignore) {
+                    return;
+                }
+                if (typeof c != 'string')
+                    return;
+                c = c.replace(/^\(\d+ bit\)\n/, '');
+                if (c.indexOf(' (') >= 0 || tn == 0x0A) { // named values: frequency
+                    const m = named[label] || (named[label] = {});
+                    m[c] = (m[c] || 0) + 1;
+                } else if (c.length <= 15) { // plain integers: totals
+                    const v = Number(c);
+                    if (!Number.isFinite(v))
+                        return;
+                    const st = numeric[label] || (numeric[label] = { count: 0, min: v, max: v, sum: 0 });
+                    ++st.count;
+                    st.sum += v;
+                    st.min = Math.min(st.min, v);
+                    st.max = Math.max(st.max, v);
+                }
+            })(rec);
+        }
+        let s = (currentName || 'input') + ': ' + recOffsets.length + ' records, ' +
+            currentDer.length + ' bytes' + (bad ? ' (' + bad + ' undecodable)' : '') + '\n';
+        s += '\nRecords by type:\n';
+        for (const [k, v] of Object.entries(roots).sort((a, b) => b[1] - a[1]))
+            s += '    ' + k + ': ' + v + '\n';
+        const namedKeys = Object.keys(named).sort();
+        if (namedKeys.length) {
+            s += '\nValue frequencies:\n';
+            for (const field of namedKeys) {
+                s += '    ' + field + ':\n';
+                const entries = Object.entries(named[field]).sort((a, b) => b[1] - a[1]);
+                for (const [val, count] of entries.slice(0, 15))
+                    s += '        ' + val + ': ' + count + '\n';
+                if (entries.length > 15)
+                    s += '        … ' + (entries.length - 15) + ' more distinct value(s)\n';
+            }
+        }
+        const numKeys = Object.keys(numeric).sort();
+        if (numKeys.length) {
+            s += '\nNumeric fields:\n';
+            for (const field of numKeys) {
+                const st = numeric[field];
+                s += '    ' + field + ': count=' + st.count + ' min=' + st.min +
+                    ' max=' + st.max + ' sum=' + st.sum + '\n';
+            }
+        }
+        s += '\n(use the record navigation or find to go back to the tree)';
+        tree.innerHTML = '';
+        dump.innerHTML = '';
+        const pre = document.createElement('pre');
+        pre.innerText = s;
+        tree.appendChild(pre);
+    },
+    butExportJSON: () => {
+        if (!currentDer || recOffsets.length === 0) {
+            alert('Nothing to export: decode some data first.');
+            return;
+        }
+        // every record, decoded transiently, as one JSON array
+        const out = [];
+        for (let ri = 0; ri < recOffsets.length; ++ri)
+            try {
+                const rec = ASN1DOM.decode(currentDer, recOffsets[ri]);
+                if (wantDef.checked)
+                    Defs.match(rec, currentType);
+                out.push({ [rec.def?.id || rec.typeName()]: rec.toJSON() });
+            } catch (e) {
+                out.push({ error: 'record ' + (ri + 1) + ' cannot be decoded: ' + (e.message || e) });
+            }
+        const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (currentName ? currentName.replace(/\.[^.]*$/, '') : 'records') + '.json';
         a.click();
         URL.revokeObjectURL(a.href);
     },
@@ -645,20 +928,36 @@ for (const [name, onClick] of Object.entries(butClickHandlers)) {
     if (elem)
         elem.onclick = onClick;
 }
-recPrev.onclick = () => {
-    if (recIndex > 0) {
-        --recIndex;
-        showCurrent();
+function stepRecord(delta) {
+    if (filterList) { // move within the filtered list only
+        let i = filterList.findIndex(ri => ri >= recIndex);
+        if (i < 0)
+            i = filterList.length;
+        if (delta > 0) {
+            if (i < filterList.length && filterList[i] === recIndex)
+                ++i;
+            if (i >= filterList.length)
+                return;
+        } else {
+            --i;
+            if (i < 0)
+                return;
+        }
+        recIndex = filterList[i];
+    } else {
+        const next = recIndex + delta;
+        if (next < 0 || next >= recOffsets.length)
+            return;
+        recIndex = next;
     }
-};
-recNext.onclick = () => {
-    if (recIndex < recOffsets.length - 1) {
-        ++recIndex;
-        showCurrent();
-    }
-};
+    showCurrent();
+}
+recPrev.onclick = () => stepRecord(-1);
+recNext.onclick = () => stepRecord(1);
 wantUrl.addEventListener('change', updateHash); // applies (or clears) the hash right away
 butFind.onclick = doSearch;
+butReplace.onclick = doReplaceAll;
+butFilter.onclick = doFilter;
 butFindPrev.onclick = () => gotoResult(searchIndex - 1);
 butFindNext.onclick = () => gotoResult(searchIndex + 1);
 searchText.onkeydown = (ev) => {
